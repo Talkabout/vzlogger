@@ -2,7 +2,7 @@
  * Main source file
  *
  * @package vzlogger
- * @copyright Copyright (c) 2011, The volkszaehler.org project
+ * @copyright Copyright (c) 2011 - 2023, The volkszaehler.org project
  * @license http://www.gnu.org/licenses/gpl.txt GNU Public License
  * @author Steffen Vogel <info@steffenvogel.de>
  */
@@ -35,6 +35,7 @@
 #include <sys/stat.h>
 #include <sys/time.h>
 #include <sys/types.h>
+#include <sysexits.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -111,7 +112,7 @@ void openLogfile(bool skip_lock = false) {
 	if (logfd == NULL) {
 		print(log_alert, "opening logfile \"%s\" failed: %s", (char *)0, options.log().c_str(),
 			  strerror(errno));
-		exit(EXIT_FAILURE);
+		exit(EX_CANTCREAT);
 	}
 
 	if (!skip_lock)
@@ -179,6 +180,10 @@ void print(log_level_t level, const char *format, const char *id, ...) {
 		fprintf(stream, "%-24s", prefix);
 		vfprintf(stream, format, args);
 		fprintf(stream, "\n");
+		if (level <= log_info) {
+			// required for some targets where stdout is redirected (e.g. docker)
+			fflush(stream);
+		}
 		m_log.unlock(); // release mutex
 	}
 	va_end(args);
@@ -256,7 +261,7 @@ void daemonize() {
 
 	int i = fork();
 	if (i < 0) {
-		exit(EXIT_FAILURE); /* fork error */
+		exit(EX_OSERR); /* fork error */
 	} else if (i > 0) {
 		exit(EXIT_SUCCESS); /* parent exits */
 	}
@@ -446,7 +451,7 @@ int main(int argc, char *argv[]) {
 	/* parse command line and file options */
 	// TODO command line should have a higher priority as file
 	if (config_parse_cli(argc, argv, &options) != SUCCESS) {
-		return EXIT_FAILURE;
+		return EX_USAGE;
 	}
 
 	// always (that's why log_alert is used) print version info to log file:
@@ -460,7 +465,7 @@ int main(int argc, char *argv[]) {
 		std::stringstream oss;
 		oss << e.what();
 		print(log_alert, "Failed to parse configuration due to: %s", NULL, oss.str().c_str());
-		return EXIT_FAILURE;
+		return EX_CONFIG;
 	}
 
 	// make sure command line options override config settings, just re-parse

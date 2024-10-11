@@ -4,7 +4,7 @@
  *
  * @author Stefan Kuntz
  * @email  Stefan.github@gmail.com
- * @copyright Copyright (c) 2017, The volkszaehler.org project
+ * @copyright Copyright (c) 2017 - 2023, The volkszaehler.org project
  * @package vzlogger
  * @license http://opensource.org/licenses/gpl-license.php GNU Public License
  **/
@@ -57,6 +57,7 @@ class InfluxDB : public ApiIF {
 	std::string _host;
 	std::string _username;
 	std::string _token;
+	struct curl_slist *_token_header;
 	std::string _organization;
 	std::string _password;
 	std::string _database;
@@ -70,6 +71,10 @@ class InfluxDB : public ApiIF {
 	bool _ssl_verifypeer;
 	std::list<Reading> _values;
 	CurlResponse::Ptr _response;
+
+	int64_t _last_timestamp; /* remember last timestamp */
+	// duplicates support:
+	Reading *_lastReadingSent;
 
 	typedef struct {
 		CURL *curl;

@@ -4,7 +4,7 @@
  *
  * @author Stefan Kuntz
  * @email  Stefan.github@gmail.com
- * @copyright Copyright (c) 2017, The volkszaehler.org project
+ * @copyright Copyright (c) 2017 - 2023, The volkszaehler.org project
  * @package vzlogger
  * @license http://opensource.org/licenses/gpl-license.php GNU Public License
  **/
@@ -41,7 +41,7 @@
 extern Config_Options options;
 
 vz::api::InfluxDB::InfluxDB(const Channel::Ptr &ch, const std::list<Option> &pOptions)
-	: ApiIF(ch), _response(new vz::api::CurlResponse()) {
+	: ApiIF(ch), _response(new vz::api::CurlResponse()), _last_timestamp(0), _lastReadingSent(0) {
 	OptionList optlist;
 	print(log_debug, "InfluxDB API initialize", ch->name());
 
@@ -57,9 +57,12 @@ vz::api::InfluxDB::InfluxDB(const Channel::Ptr &ch, const std::list<Option> &pOp
 		throw;
 	}
 
+	_token_header = NULL;
 	try {
 		_token = optlist.lookup_string(pOptions, "token");
 		print(log_finest, "api InfluxDB using login Token: %s", ch->name(), _token.c_str());
+		_token = "Authorization: Token " + _token;
+		_token_header = curl_slist_append(_token_header, _token.c_str());
 	} catch (vz::OptionNotFoundException &e) {
 		print(log_finest, "api InfluxDB no Token set", ch->name());
 		_token = "";
@@ -233,12 +236,11 @@ vz::api::InfluxDB::InfluxDB(const Channel::Ptr &ch, const std::list<Option> &pOp
 	curl_free(database_urlencoded);
 }
 
-vz::api::InfluxDB::~InfluxDB() // destructor
-{}
+// destructor
+vz::api::InfluxDB::~InfluxDB() { curl_slist_free_all(_token_header); }
 
 void vz::api::InfluxDB::send() {
 	long int http_code;
-	struct curl_slist *list = NULL;
 	CURLcode curl_code;
 	int request_body_lines = 0;
 	std::string request_body;
@@ -276,6 +278,10 @@ void vz::api::InfluxDB::send() {
 		print(log_debug, "cleaned buffer, now %i items", channel()->name(), buf->size());
 	}
 
+	int64_t timestamp = 1;
+	const int duplicates = channel()->duplicates();
+	const int duplicates_ms = duplicates * 1000;
+
 	// build request body from buffer contents
 	buf->lock();
 	for (it = buf->begin(); it != buf->end(); it++) {
@@ -284,25 +290,66 @@ void vz::api::InfluxDB::send() {
 				  channel()->name());
 			break;
 		}
+
+		bool sendData = false;
+
+		timestamp = it->time_ms();
+
 		print(log_finest, "Reading buffer: timestamp %lld value %f", channel()->name(),
 			  it->time_ms(), it->value());
-		request_body.append(_measurement_name);
-		if (_send_uuid) {
-			request_body.append(",uuid=");
-			request_body.append(channel()->uuid());
+
+		print(log_debug, "compare: %lld %lld", channel()->name(), _last_timestamp, timestamp);
+		// we can only add/consider a timestamp if the ms resolution is not before than from
+		// previous one:
+		if (_last_timestamp <= timestamp) {
+			if (0 == duplicates) { // send all values
+				sendData = true;
+				_last_timestamp = timestamp;
+			} else {
+				const Reading &r = *it;
+				// duplicates should be ignored
+				// but send at least each <duplicates> seconds
+
+				if (!_lastReadingSent) { // first one from the duplicate consideration -> send it
+					sendData = true;
+					_lastReadingSent = new Reading(r);
+					_last_timestamp = timestamp;
+				} else { // one reading sent already. compare
+					// a) timestamp
+					// b) duplicate value
+					if ((timestamp >= (_last_timestamp + duplicates_ms)) ||
+						(r.value() != _lastReadingSent->value())) {
+						// send the current one:
+						sendData = true;
+						_last_timestamp = timestamp;
+						*_lastReadingSent = r;
+					} else {
+						// ignore it
+					}
+				}
+			}
 		}
-		if (!_tags.empty()) {
-			request_body.append(",");
-			request_body.append(_tags);
+
+		if (sendData) {
+			request_body.append(_measurement_name);
+			if (_send_uuid) {
+				request_body.append(",uuid=");
+				request_body.append(channel()->uuid());
+			}
+			if (!_tags.empty()) {
+				request_body.append(",");
+				request_body.append(_tags);
+			}
+			std::stringstream value_str;
+			value_str << " value=" << std::fixed << std::setprecision(6) << it->value();
+			request_body.append(value_str.str());
+			request_body.append(" ");
+			request_body.append(std::to_string(timestamp));
+			request_body.append("\n"); // each measurement on new line
+			request_body_lines++;
 		}
-		std::stringstream value_str;
-		value_str << " value=" << std::fixed << std::setprecision(6) << it->value();
-		request_body.append(value_str.str());
-		request_body.append(" ");
-		request_body.append(std::to_string(it->time_ms()));
-		request_body.append("\n"); // each measurement on new line
+
 		it->mark_delete();
-		request_body_lines++;
 	}
 
 	buf->unlock();
@@ -317,10 +364,8 @@ void vz::api::InfluxDB::send() {
 			curl_easy_setopt(_api.curl, CURLOPT_HTTPAUTH, CURLAUTH_BASIC);
 			curl_easy_setopt(_api.curl, CURLOPT_USERNAME, _username.c_str());
 			curl_easy_setopt(_api.curl, CURLOPT_PASSWORD, _password.c_str());
-		} else if (!_token.empty()) {
-			std::string authtoken = "Authorization: Token " + _token;
-			list = curl_slist_append(list, authtoken.c_str());
-			curl_easy_setopt(_api.curl, CURLOPT_HTTPHEADER, list);
+		} else if (_token_header) {
+			curl_easy_setopt(_api.curl, CURLOPT_HTTPHEADER, _token_header);
 		}
 		curl_easy_setopt(_api.curl, CURLOPT_URL, _url.c_str());
 		curl_easy_setopt(_api.curl, CURLOPT_VERBOSE, options.verbosity() > 0);

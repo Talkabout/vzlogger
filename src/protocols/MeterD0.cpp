@@ -7,7 +7,7 @@
  * protocols and meters.
  *
  * @package vzlogger
- * @copyright Copyright (c) 2011, The volkszaehler.org project
+ * @copyright Copyright (c) 2011 - 2023, The volkszaehler.org project
  * @license http://www.gnu.org/licenses/gpl.txt GNU Public License
  * @author Steffen Vogel <info@steffenvogel.de>
  * @author Mathias Dalheimer <md@gonium.net>
@@ -42,6 +42,8 @@
 // socket
 #include <netdb.h>
 #include <sys/socket.h>
+
+#include "threads.h"
 
 #include "protocols/MeterD0.hpp"
 #include <VZException.hpp>
@@ -378,9 +380,9 @@ ssize_t MeterD0::read(std::vector<Reading> &rds, size_t max_readings) {
 
 	bool error_flag = false;
 	const int VENDOR_LEN = 3;
-	char vendor[VENDOR_LEN + 1]; // 3 upper case vendor + '\0' termination
+	char vendor[VENDOR_LEN + 1] = {0}; // 3 upper case vendor + '\0' termination
 	const int IDENTIFICATION_LEN = 16;
-	char identification[IDENTIFICATION_LEN + 1]; // 16 meter specific + '\0' termination
+	char identification[IDENTIFICATION_LEN + 1] = {0}; // 16 meter specific + '\0' termination
 	const int OBIS_LEN = 16;
 	char obis_code[OBIS_LEN + 1]; /* A-B:C.D.E*F
 							 fields A, B, E, F are optional
@@ -470,6 +472,7 @@ ssize_t MeterD0::read(std::vector<Reading> &rds, size_t max_readings) {
 	}
 
 	while (1) {
+		_safe_to_cancel();
 		// check for timeout
 		time(&end_time);
 		if (difftime(end_time, start_time) > _read_timeout_s) {
@@ -757,8 +760,9 @@ ssize_t MeterD0::read(std::vector<Reading> &rds, size_t max_readings) {
 			}
 
 			print(log_debug,
-				  "Read package with %i tuples (vendor=%s, baudrate=%c, identification=%s)",
-				  name().c_str(), number_of_tuples, vendor, baudrate, identification);
+				  "Read package with %llu tuples (vendor=%s, baudrate=%c, identification=%s)",
+				  name().c_str(), (unsigned long long)number_of_tuples, vendor, baudrate,
+				  identification);
 			return number_of_tuples;
 		} // end switch
 
@@ -1019,8 +1023,10 @@ void MeterD0::dump_file(DUMP_MODE mode, const char *buf, size_t len) {
 				delta = 0;
 			ts_last = ts;
 			char tbuf[30];
-			int l = snprintf(tbuf, sizeof(tbuf), "%2ld.%.9lds (%6ld ms) ", ts.tv_sec % 100,
-							 ts.tv_nsec, delta);
+			// time_t may be long or long long depending on architecture, casting to long long for
+			// portability
+			int l = snprintf(tbuf, sizeof(tbuf), "%2lld.%.9llds (%6ld ms) ",
+							 (long long)ts.tv_sec % 100, (long long)ts.tv_nsec, delta);
 			fwrite(tbuf, 1, l, _dump_fd);
 		}
 		if (e)
